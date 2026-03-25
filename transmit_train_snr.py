@@ -84,6 +84,16 @@ snr = random.randint(-10, 10)
 random_number = str(snr)
 parser.add_argument('--multiple-snr', type=str, default= random_number,
                     help='random or fixed snr')
+parser.add_argument('--use-importance-selector', action='store_true',
+                    help='enable learnable importance map based feature gating')
+parser.add_argument('--importance-alpha', type=float, default=1.0,
+                    help='importance map gain factor')
+parser.add_argument('--use-adaptive-snr-codec', action='store_true',
+                    help='enable continuous adaptive SNR encoder/decoder')
+parser.add_argument('--snr-encoder-path', type=str, default='snrencoder_-10_model2_1.pth',
+                    help='path to legacy snr encoder checkpoint')
+parser.add_argument('--snr-decoder-path', type=str, default='snrdecoder_-10_model2_1.pth',
+                    help='path to legacy snr decoder checkpoint')
 
 # parser.add_argument('--multiple-snr', type=str, default='20',
 #                     help='random or fixed snr')
@@ -378,6 +388,5 @@ if __name__ == '__main__':
             torch.save(decoder, '/home/zwz21/下载/SegNet/snrdecoder_all_model_1.pth')
             # test()
        
-
 
 

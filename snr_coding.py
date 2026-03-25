@@ -157,6 +157,86 @@ class snrDecoder(nn.Module):
         return x
 
 
+class SNRConditionEmbedding(nn.Module):
+    def __init__(self, hidden_dim=16):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, snr, batch_size, device):
+        if isinstance(snr, torch.Tensor):
+            snr_tensor = snr.to(device=device, dtype=torch.float32)
+            if snr_tensor.ndim == 0:
+                snr_tensor = snr_tensor.repeat(batch_size)
+            elif snr_tensor.numel() == 1:
+                snr_tensor = snr_tensor.reshape(1).repeat(batch_size)
+            snr_tensor = snr_tensor.reshape(batch_size, 1)
+        else:
+            snr_tensor = torch.full((batch_size, 1), float(snr), device=device, dtype=torch.float32)
+        return self.net(snr_tensor)
+
+
+class AdaptiveSNREncoder(nn.Module):
+    """Continuous SNR-adaptive encoder via expert gating."""
+
+    def __init__(self, mid_channels=(64, 128, 256), cond_dim=16):
+        super().__init__()
+        c1, c2, c3 = mid_channels
+        self.expert1 = nn.Sequential(nn.LazyConv2d(c1, 3, padding=1), nn.ReLU(inplace=True))
+        self.expert2 = nn.Sequential(nn.Conv2d(c1, c2, 3, padding=1), nn.ReLU(inplace=True))
+        self.expert3 = nn.Sequential(nn.Conv2d(c2, c3, 3, padding=1), nn.ReLU(inplace=True))
+        self.cond = SNRConditionEmbedding(hidden_dim=cond_dim)
+        self.gate = nn.Linear(cond_dim, 3)
+
+    def forward(self, x, snr):
+        b = x.shape[0]
+        cond = self.cond(snr, b, x.device)
+        w = torch.softmax(self.gate(cond), dim=-1).view(b, 3, 1, 1, 1)
+
+        y1 = self.expert1(x)
+        y2 = self.expert2(y1)
+        y3 = self.expert3(y2)
+
+        y2_proj = nn.functional.interpolate(y2, size=y3.shape[-2:], mode='bilinear', align_corners=False)
+        y1_proj = nn.functional.interpolate(y1, size=y3.shape[-2:], mode='bilinear', align_corners=False)
+        y1_proj = nn.functional.pad(y1_proj, (0, 0, 0, 0, 0, y3.shape[1] - y1_proj.shape[1]))
+        y2_proj = nn.functional.pad(y2_proj, (0, 0, 0, 0, 0, y3.shape[1] - y2_proj.shape[1]))
+
+        stacked = torch.stack([y1_proj, y2_proj, y3], dim=1)
+        return torch.sum(stacked * w, dim=1)
+
+
+class AdaptiveSNRDecoder(nn.Module):
+    """Continuous SNR-adaptive decoder via expert gating."""
+
+    def __init__(self, out_channels=1, mid_channels=(256, 128, 64), cond_dim=16):
+        super().__init__()
+        c1, c2, c3 = mid_channels
+        self.expert1 = nn.Sequential(nn.LazyConv2d(c2, 3, padding=1), nn.ReLU(inplace=True))
+        self.expert2 = nn.Sequential(nn.Conv2d(c2, c3, 3, padding=1), nn.ReLU(inplace=True))
+        self.expert3 = nn.Conv2d(c3, out_channels, 3, padding=1)
+        self.cond = SNRConditionEmbedding(hidden_dim=cond_dim)
+        self.gate = nn.Linear(cond_dim, 3)
+
+    def forward(self, x, snr):
+        b = x.shape[0]
+        cond = self.cond(snr, b, x.device)
+        w = torch.softmax(self.gate(cond), dim=-1).view(b, 3, 1, 1, 1)
+
+        y1 = self.expert1(x)
+        y2 = self.expert2(y1)
+        y3 = self.expert3(y2)
+
+        y1_proj = nn.functional.pad(y1, (0, 0, 0, 0, 0, y3.shape[1] - y1.shape[1]))
+        y2_proj = nn.functional.pad(y2, (0, 0, 0, 0, 0, y3.shape[1] - y2.shape[1]))
+        stacked = torch.stack([y1_proj, y2_proj, y3], dim=1)
+        return torch.sum(stacked * w, dim=1)
+
+
 
 
 # # 构建模型

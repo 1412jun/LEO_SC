@@ -7,7 +7,10 @@ from channel import Channel
 from snr_coding import snrEncoder
 from snr_coding import snrDecoder
 from snr_coding import snrChannel
+from snr_coding import AdaptiveSNREncoder
+from snr_coding import AdaptiveSNRDecoder
 from snr_coding import add_noise
+from importance_selector import ImportancePredictor
 # from denoise2 import UNet2Layer
 # from denoise3 import UNet2Layer
 # from loss.distortion import Distortion
@@ -16,6 +19,7 @@ from distortion import Distortion
 # from net.channel import Channel
 from random import choice
 import torch.nn as nn
+import torch
 global snr
 
 class WITT(nn.Module):
@@ -45,6 +49,33 @@ class WITT(nn.Module):
             self.multiple_snr[i] = int(self.multiple_snr[i])
         self.downsample = config.downsample
         self.model = args.model
+        self.use_importance_selector = getattr(args, 'use_importance_selector', False)
+        self.importance_alpha = getattr(args, 'importance_alpha', 1.0)
+        self.use_adaptive_snr_codec = getattr(args, 'use_adaptive_snr_codec', False)
+        self.snr_encoder_path = getattr(args, 'snr_encoder_path', 'snrencoder_-10_model2_1.pth')
+        self.snr_decoder_path = getattr(args, 'snr_decoder_path', 'snrdecoder_-10_model2_1.pth')
+
+        if self.use_importance_selector:
+            self.importance_selector = ImportancePredictor()
+
+        if self.use_adaptive_snr_codec:
+            self.snr_encoder_module = AdaptiveSNREncoder()
+            self.snr_decoder_module = AdaptiveSNRDecoder()
+        else:
+            self.snr_encoder_module = None
+            self.snr_decoder_module = None
+
+        self.snr_channel_module = snrChannel().cuda()
+        self._legacy_codec_loaded = False
+
+    def _ensure_legacy_codec_loaded(self):
+        if self._legacy_codec_loaded:
+            return
+        self.snr_encoder_module = snrEncoder().cuda()
+        self.snr_decoder_module = snrDecoder().cuda()
+        self.snr_encoder_module = torch.load(self.snr_encoder_path)
+        self.snr_decoder_module = torch.load(self.snr_decoder_path)
+        self._legacy_codec_loaded = True
 
     def distortion_loss_wrapper(self, x_gen, x_real):
         distortion_loss = self.distortion_loss.forward(x_gen, x_real, normalization=self.config.norm)
@@ -71,6 +102,10 @@ class WITT(nn.Module):
 
         feature = self.encoder(input_image, chan_param, self.model)
 
+        if self.use_importance_selector:
+            importance_map = self.importance_selector(feature, image=input_image, snr=chan_param)
+            feature = feature * (1.0 + self.importance_alpha * importance_map)
+
 
         CBR = feature.numel() / 2 / input_image.numel()
         # Feature pass channel
@@ -92,19 +127,12 @@ class WITT(nn.Module):
         # noisy_feature = output.squeeze(0)  
         # noisy_feature = output.squeeze(0)
 
-        encoder = snrEncoder().cuda()
-        encoder = torch.load(r"snrencoder_-10_model2_1.pth")
-        # encoder = torch.load(r"snrencoder_all_model_1.pth")
-        # print("encoder=",encoder)
-        channel = snrChannel().cuda()
+        if not self.use_adaptive_snr_codec:
+            self._ensure_legacy_codec_loaded()
 
-        decoder = snrDecoder().cuda()
-        decoder= torch.load(r"snrdecoder_-10_model2_1.pth")
-        # decoder= torch.load(r"snrdecoder_all_model_1.pth")
-        # print("decoder=",decoder)
-        encoded = encoder(feature, snr)
-        transmitted = channel(encoded, snr)
-        noisy_feature = decoder(transmitted, snr)
+        encoded = self.snr_encoder_module(feature, snr)
+        transmitted = self.snr_channel_module(encoded, snr)
+        noisy_feature = self.snr_decoder_module(transmitted, snr)
     
         # noisy_feature = add_noise(feature, snr)
         # noisy_feature = feature
